@@ -1,0 +1,90 @@
+import sys
+from awsglue.utils import getResolvedOptions
+from pyspark.context import SparkContext
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from pyspark.sql import functions as F
+from datetime import datetime
+import boto3
+# --------------------------
+# Glue Context Setup
+# --------------------------
+args = getResolvedOptions(sys.argv, ["JOB_NAME"])
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args["JOB_NAME"], args)
+
+# --------------------------
+# Paths
+# --------------------------
+process_date = datetime.today().strftime("%Y-%m-%d")
+
+silver_path = "s3://netflix-data-projec/silver/processed_date=2026-05-08/"
+gold_path   = "s3://netflix-data-projec/gold/"
+
+# --------------------------
+# Read from Silver Layer
+# --------------------------
+silver_df = spark.read.parquet(silver_path)
+
+# --------------------------
+# Read existing Gold Layer (if available)
+# --------------------------
+try:
+    gold_df = spark.read.parquet(gold_path)
+    print("✅ Gold layer found.")
+except Exception as e:
+    print("⚠️ No Gold data found, creating new one...")
+    gold_df = spark.createDataFrame([], silver_df.schema)
+
+
+# --------------------------
+# Simple Join (based on show_id)
+# --------------------------
+# You can adjust join type: inner, left, right, full_outer
+joined_df = silver_df.join(
+    gold_df,
+    on=["show_id"],  # join key
+    how="left"       # choose the join type as needed
+)
+
+# --------------------------
+# Select final columns from join
+# --------------------------
+final_gold = joined_df.select(
+    silver_df["show_id"],
+    silver_df["title"],
+    silver_df["rating"],
+    silver_df["country"],
+    silver_df["release_year"]
+)
+
+# --------------------------
+# Overwrite Gold Layer
+# --------------------------
+final_gold.write.mode("overwrite").parquet(gold_path)
+
+print("✅ Gold layer overwritten successfully with joined data.")
+
+bucket_name = "netflix-data-projec"
+prefix = "bronze/"
+
+s3 = boto3.client("s3")
+
+# Attempt to delete all objects under the prefix
+# List objects (even if empty, returns empty list)
+response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
+
+# Prepare list of objects to delete
+objects_to_delete = [{"Key": obj["Key"]} for obj in response.get("Contents", [])]
+
+if objects_to_delete:
+    s3.delete_objects(
+        Bucket=bucket_name,
+        Delete={"Objects": objects_to_delete}
+    )
+
+print(f"✅ Deleted {len(objects_to_delete)} objects from s3://{bucket_name}/{prefix}")
+job.commit()

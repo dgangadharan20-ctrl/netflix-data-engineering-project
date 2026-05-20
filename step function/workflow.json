@@ -1,0 +1,181 @@
+{
+  "Comment": "Netflix ETL State Machine with crawler monitoring and retries",
+  "StartAt": "start-crawler",
+  "States": {
+    "start-crawler": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:glue:startCrawler",
+      "Parameters": {
+        "Name": "netflix-bronze-crawler"
+      },
+      "Next": "wait-for-crawler",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Glue.CrawlerRunningException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 10,
+          "BackoffRate": 2,
+          "MaxAttempts": 3
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "crawler-failed-sns"
+        }
+      ]
+    },
+    "wait-for-crawler": {
+      "Type": "Wait",
+      "Seconds": 10,
+      "Next": "get-crawler-status"
+    },
+    "get-crawler-status": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:glue:getCrawler",
+      "Parameters": {
+        "Name": "netflix-bronze-crawler"
+      },
+      "Next": "check-crawler-status",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 5,
+          "BackoffRate": 2,
+          "MaxAttempts": 3
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "crawler-failed-sns"
+        }
+      ]
+    },
+    "check-crawler-status": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.Crawler.State",
+          "StringEquals": "RUNNING",
+          "Next": "wait-for-crawler"
+        },
+        {
+          "Variable": "$.Crawler.LastCrawl.Status",
+          "StringEquals": "SUCCEEDED",
+          "Next": "bronze-to-silver"
+        },
+        {
+          "Variable": "$.Crawler.LastCrawl.Status",
+          "StringEquals": "FAILED",
+          "Next": "crawler-failed-sns"
+        }
+      ],
+      "Default": "wait-for-crawler"
+    },
+    "crawler-failed-sns": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "Message": "🚨 Netflix Bronze Crawler FAILED",
+        "TopicArn": "arn:aws:sns:ap-south-1:278029334708:netflix-topic"
+      },
+      "End": true
+    },
+    "bronze-to-silver": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "bronze-to-silver"
+      },
+      "Next": "silver-to-gold",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Glue.ConcurrentRunsExceededException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 15,
+          "BackoffRate": 2,
+          "MaxAttempts": 3
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "job-failed-sns"
+        }
+      ]
+    },
+    "silver-to-gold": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "silver-to-gold"
+      },
+      "Next": "DeleteObjects",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Glue.ConcurrentRunsExceededException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 15,
+          "BackoffRate": 2,
+          "MaxAttempts": 3
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "job-failed-sns"
+        }
+      ]
+    },
+    "DeleteObjects": {
+      "Type": "Task",
+      "Parameters": {
+        "Bucket": "netflix-data-projec",
+        "Delete": {
+          "Objects": [
+            {
+              "Key": "bronze/"
+            }
+          ]
+        }
+      },
+      "Resource": "arn:aws:states:::aws-sdk:s3:deleteObjects",
+      "Next": "complete-job-notify"
+    },
+    "job-failed-sns": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "Message": "🚨 Netflix Glue Job FAILED",
+        "TopicArn": "arn:aws:sns:ap-south-1:278029334708:netflix-topic"
+      },
+      "End": true
+    },
+    "complete-job-notify": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "Message": "✅ Netflix ETL pipeline completed successfully",
+        "TopicArn": "arn:aws:sns:ap-south-1:278029334708:netflix-topic"
+      },
+      "End": true
+    }
+  }
+}
