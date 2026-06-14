@@ -1,0 +1,9 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"  
+Description: create bronze, sliver, gold s3 buckets
+Resources: 
+
+    Type: AWS::S3::Bucket
+        Properties:
+         BucketName: netflix-data-projec
+
